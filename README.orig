@@ -1,0 +1,27 @@
+If not already present, make an "autoload" directory in $VIMRUNTIME.
+Put DoTagStuff.vim in your autoload directory.
+
+In your vimrc, add (if you don't already have something similar):
+
+     " Auto-load functions on an as-needed basis.
+     autocmd FuncUndefined *	exe 'runtime autoload/' . expand('<afile>') . '.vim'
+
+For whatever languages you want, add to or create a syntax "after" file; e.g.:
+
+...vim/after/syntax/c.vim
+...vim/after/syntax/perl.vim
+
+Samples have been included in the package.
+
+The "find_tagstuff" perl script needs to be put someplace on your path, or
+hardcode the full path to it in the DoTagStuff.vim script.  This script will
+create files starting with ".vim" (so they won't normally be seen), that are
+little vim scripts that get sourced to set syntax highlighting.
+
+Note that this stuff was rather quickly extracted from our working environment,
+and edited to try and remove most of our environment-specific settings.  It all
+works fine in our environment, and I *think* I've included all the pieces here,
+but it hasn't been tested in this form.
+
+Note also that it was all designed for a Linux environment; no guarantees on
+behavior under Windows.

@@ -1,0 +1,1026 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+# find_tagstuff -- Extract information from tag files.
+#
+#	Generates vim scripts used to define syntax groups for applicable tag
+#	entries.  The group names are of the form:
+#		c<scope><class><type>
+#
+#	Where:
+#		<scope>	is "External", "Static", or "Dynamic" (non-static local
+#		        variables).
+#		<class>	is "Lib", "Unify", or blank (see tag2class).
+#		<type>	is the type of tag the entry was generated for, as
+#			given on the command line (see %tag_type_patterns),
+#			with the trailing 's' removed.
+#
+#		e.g., cExternalLibDefine
+#
+#	When the '-c' flag is given, [vim] script file(s) are generated, each
+#	<type> is put into a separate file, with a name of the form
+#	".vim<type>" (e.g., ".vimConstants").
+#
+# =============================================================================
+
+# $Header: /usr/home/common/vim/helpers/RCS/find_tagstuff,v 1.28 2005/03/08 03:05:30 gary Exp $
+
+# =============================================================================
+
+($self = $0) =~ s#.*/##;
+$self_stamp = -M $0;
+
+$| = 1;
+
+$Usage = "Usage: $self [-D] [-c] [-q] [--types] {[{static|extern}] tag_type}... [[--files] tag_file ...]\n"
+       . "or     $self --file-names\n";
+
+$tag_type_prefix = ';"\t';
+
+# If not descriminating static or extern, any attributes (tokens following the
+# tag-type) are accecptable.
+#
+# Static tags (local to the file containing the tag) must have a "file:"
+# attribute.
+#
+# Global tags (not local to the file containing the tag) must NOT contain a
+# "file:" attribute.
+#
+$any_attribute          = '(?:\t\S+:(?:\S+)?)';
+$file_attribute         = '(?:\tfile:(?:\S+)?)';
+$non_file_attribute     = '(?:\t\S+(?<!file):(?:\S+)?)';
+
+$any_tag_type_suffix    = "$any_attribute*\$";
+$static_tag_type_suffix = "$any_attribute*$file_attribute$any_attribute*\$";
+$extern_tag_type_suffix = "$non_file_attribute*\$";
+
+%tag_type_patterns = (
+     Classes       => '(c|class)',
+     Macros        => '(d|macro)',
+     Constants     => '(d|macro)',
+     Enumerators   => '(e|enumerator)',
+     Functions     => '(f|function|procedure|subroutine|prototype)',
+     EnumNames     => '(g|enum)',
+     Locals        => '(l|local)',
+     StructMembers => '(m|member)',
+     Namespaces    => '(n|namespace)',
+     Prototypes    => '(p|prototype)',
+     StructNames   => '(s|struct)',
+     Types         => '(t|typedef)',
+     UnionNames    => '(u|union)',
+     Globals       => '(v|x|variable)',
+     Labels        => '(label)',
+     Methods       => '(method)',
+     Packages      => '(package)',
+);
+
+%tag_type_descriptions = (
+     Classes       => 'Classes',
+     Constants     => "\"Constant\" #define's",
+     Macros        => "Macro (#define) names",
+     Enumerators   => "Enumerated type values",
+     Functions     => "Function names",
+     EnumNames     => "Enumeration names",
+     Locals        => "Local variables",
+     StructMembers => 'Structure members',
+     Namespaces    => 'Namespaces',
+     Prototypes    => 'Function prototypes and declarations',
+     StructNames   => "Structure names",
+     Types         => "Type names",
+     UnionNames    => "Union names",
+     Globals       => "Global variables.",
+     Labels        => 'Labels',
+     Methods       => 'Methods',
+     Packages      => 'Packages',
+);
+
+%short_tag_types = (
+     CL => 'Classes',
+     C  => 'Constants',
+     M  => 'Macros',
+     E  => 'Enumerators',
+     F  => 'Functions',
+     EN => 'EnumNames',
+     LV => 'Locals',
+     SM => 'StructMembers',
+     N  => 'Namespaces',
+     FP => 'Prototypes',	PR => 'Prototypes',
+     SN => 'StructNames',
+     T  => 'Types',
+     UN => 'UnionNames',
+     G  => 'Globals',
+     L  => 'Labels',
+     ME => 'Methods',
+     P  => 'Packages',
+);
+
+# =============================================================================
+
+if ($ARGV[0] eq '-?' or $ARGV[0] eq '--help') {
+     print $Usage;
+     print <<"END_OF_VERBOSE_USAGE";
+Where:
+   -D		Debug mode.
+
+   -c		Create a ".vim<xxx>" file corresponding to each <file> (instead
+		of going to stdout).  Where the <xxx> suffix depends upon the
+		<tag_type> given (see below).
+
+   -q		Don't emit VIM_SCRIPT_FILE messages (used by [vim]).
+
+   <tag_type>	Type of tag information to extract (see below), or "ALL".
+		If <tag_type> is preceded with "static", only local (static)
+		tags of that type will be extracted.  If <tag_type> is preceded
+		with "extern", only external tags of that type will be
+		extracted.
+
+   <tag_file>	Tags file(s) to extract the information from.
+
+   A <tag_type> of "ALL" can be used to specify all known types.
+
+   Without --types, arguments are used as <tag_type>'s until one is not
+   recognized as a <tag_type>; then all subsequent arguments are treated as
+   <tag_file>'s.
+
+   If --types is used, all subsequent arguments are used as <tag_type>'s until
+   a --files (which must be present) is found.
+
+   All arguments following a --files will be used as <tag_file>'s.
+
+   ===
+
+   --file-names		Lists all possible file names that could be generated.
+
+END_OF_VERBOSE_USAGE
+
+     print "Tag types availble for extraction:\n";
+     printf "\t%-4s %-20s %-1s\n", 'Abbr', 'tag_type', 'Description';
+     printf "\t" . ('-'x4) . ' ' . ('-'x20) . ' ' . ('-'x40) . "\n";
+     foreach $tag_type (sort keys %tag_type_patterns) {
+	  undef $abbr;
+	  foreach (keys %short_tag_types) {
+	       if ($short_tag_types{$_} eq $tag_type) {
+		    $abbr = $_;
+		    last;
+	       }
+	  }
+
+	  printf "\t(%-2s) %-20s %-1s\n",
+	         $abbr, $tag_type, $tag_type_descriptions{$tag_type};
+     }
+     exit 0;
+}
+
+while ($ARGV[0] =~ /^-/) {
+     last if ($flag = shift) eq '--';
+
+     if      ($flag eq '-D') { $DEBUG          = 1;
+     } elsif ($flag eq '-c') { $create_vimfile = 1;
+     } elsif ($flag eq '-q') { $quiet          = 1;
+
+     } elsif ($flag eq '--types') {
+	  $expecting_type = 1;
+	  undef $expecting_file;
+	  last;
+
+     } elsif ($flag eq '--files') {
+	  undef $expecting_type;
+	  $expecting_file = 1;
+	  last;
+
+     } elsif ($flag eq '--file-names') {
+	  print '.vim' if %tag_type_patterns;
+	  print join(' .vim', sort keys %tag_type_patterns) . "\n";
+	  exit 0;
+
+     } else {
+	  die "$self: Unrecognized flag: '$flag'\n";
+     }
+}
+
+while (@ARGV) {
+     $arg = shift;
+
+     if ($arg eq '--types') {
+	  $expecting_type = 1;
+	  undef $expecting_file;
+	  next;
+     } elsif ($arg eq '--files') {
+	  $expecting_file = 1;
+	  undef $expecting_type;
+	  next;
+     }
+
+     if ($expecting_file) {
+	  print "[FILE: $arg]\n" if $DEBUG;
+	  push @files, $arg;
+
+     } else {
+	  if ($arg eq 'static' || $arg eq 'extern') {
+	       die "$self: No type following ``$arg''\n" unless @ARGV;
+	       $scope = "${arg}:";
+	       $arg   = shift;
+	  } else {
+	       undef $scope;
+	  }
+
+	  # Either we've been explicitly told the following argument(s) are
+	  # types, or nothing has been specified.
+	  #
+	  if ($arg eq 'ALL') {
+	       print "[Finding ALL types]\n" if $DEBUG;
+	       @find_tag_types = (keys %tag_type_patterns);
+	  } else {
+	       print "[Finding \"$arg\"'s" if $DEBUG;
+	       if (defined $short_tag_types{$arg}) {
+		    $arg = $short_tag_types{$arg};
+		    print " ($arg)" if $DEBUG;
+	       }
+	       print "]\n" if $DEBUG;
+
+	       if ($arg =~ m#/# && not $expecting_type) {
+		    # Looks like a file name; unless we're specifically
+		    # expecting a type, start taking in file names.
+		    #
+		    unshift @ARGV, $arg;
+		    unshift @ARGV, '--files';
+		    print "[Looks like file; putting arg back]\n" if $DEBUG;
+		    next;
+	       }
+
+	       unless (defined $tag_type_patterns{$arg}) {
+		    if (-f $arg && not $expecting_type) {
+			 # We got something we don't recognize as a type, and
+			 # it is the name of a file, unless we're specifically
+			 # expecting a type, start taking in file names.
+			 #
+			 print "[Is a file; putting arg back]\n" if $DEBUG;
+			 unshift @ARGV, $arg;
+			 unshift @ARGV, '--files';
+			 next;
+		    }
+
+		    warn "[$self: Don't know how to find type \"$arg\"; "
+		       . "ignoring]\n";
+
+		    next;
+	       }
+
+	       print "[FINDING $scope$arg]\n" if $DEBUG;
+	       push @find_tag_types, "$scope$arg";
+	  }
+     }
+}
+
+unless (@find_tag_types) {
+     warn "$self: Don't know what to find.\n";
+     die $Usage;
+}
+
+# In case any types were mentioned more than once, only process each type once,
+# in the order of first occurance (i.e., make a unique type list).
+#
+# NOTE: Make sure to maintain the order of types as given.  This is important
+#       to maintain the precedence order in vim for the syntax items.
+#
+foreach (@find_tag_types) {
+     ($type = $_) =~ s/.*://;	# Remove the scope, if any.
+     push @unique_tag_types, $_ unless $unique_tag_types{$type};
+     $unique_tag_types{$type} = 1;
+}
+undef %unique_tag_types;
+@find_tag_types = @unique_tag_types;
+undef @unique_tag_types;
+
+print "[FINDING: \"" . join('", "', @find_tag_types) . "\"]\n" if $DEBUG;
+
+unshift @files, '-' unless @files;	# Use stdin if no file(s) given.
+
+chomp($pwd = `pwd`);
+
+# Cache the information about the tags file(s) so we don't have to repetedly
+# determine the information inside the tag-type loop below.
+#
+# This was a *tremendous* speed improvement.
+#
+# We want to *process* the tags files in reverse order.
+#
+# This is because this script is normally run by [vim] at startup, giving the
+# tags files as arguments; first tag file being the highest tag priority, and
+# the last tag file being lowest tag priority.  We would like the syntax
+# highlighting to have the same precedence, so if we process the files in the
+# reverse order given, the first file given will be the last file processed, so
+# that its syntax rules will be the last rules sourced in, and therefore have
+# the highest syntax-rule priority.
+#
+# So, we'll *scan* the incoming file list in order (because we're going to
+# eliminate duplicates, and we want to keep the higher-priority instances), but
+# we'll use "unshift" to build the @tag_file_info list.
+#
+undef %seen;
+foreach $arg_file (@files) {
+     foreach $tag_file (glob $arg_file) {
+	  print "[TAG FILE: $tag_file]\n" if $DEBUG;
+
+	  # Don't bother processing empty tag files.
+	  next unless $tag_file eq '-' || -s $tag_file;
+
+	  # When going into a help file, the vim doc tags file is added to the
+	  # tags variable; we don't want to mess with making .vim* files for
+	  # that tags file.  Plus it seems to stick around in the tags
+	  # variable; so it's simply easier to ignore it here.
+	  #
+	  next if $tag_file =~ m#/usr/local/share/vim/\S+/doc/tags#;
+
+	  # Ignore the special screen-doc tags file.
+	  next if $tag_file =~ m#/DOC/#;
+
+	  if ($tag_file eq '-') {
+	       $dir = '.';
+	  } else {
+	       chomp($dir = `dirname $tag_file`);
+	       $dir = '.' if $dir eq $pwd;
+
+	       # Don't bother processing a tags file if we cannot write into the
+	       # directory it's in (to create the .vim* files).
+	       #
+	       ($tag_dir = $tag_file) =~ s#/tags$##;
+	       next unless -w $tag_dir;
+	  }
+
+	  next if $seen{"$dir/$tag_file"};
+	  $seen{"$dir/$tag_file"} = 1;
+
+	  unshift @tag_file_info, [ $tag_file, $dir, -M $tag_file ];
+     }
+}
+
+foreach (@find_tag_types) {
+
+     ($scope, $tag_type) = /^(?:([^:]+):)?(.+)$/;
+
+     $suffix = ($scope eq 'static') ? $static_tag_type_suffix :
+	       ($scope eq 'extern') ? $extern_tag_type_suffix :
+				      $any_tag_type_suffix;
+
+     if ($DEBUG) {
+	  print "[Finding \"$_\" (Scope=\"$scope\", Type=\"$tag_type\")]\n";
+	  print "[Using suffix pattern \"$suffix\"]\n";
+     }
+
+     $vimfile = ".vim$tag_type";
+     $vimfile .= ".$scope" if $scope;
+
+     # Make a match pattern that isolates the tag ID we're looking for.
+     $tag_match = $tag_type_prefix
+	        . $tag_type_patterns{$tag_type}
+	        . $suffix;
+
+     # If we're looking for types, make a secondary match pattern for macros
+     # defining the "T" types; if we're looking for macros, eliminate them.
+     #
+     undef $tag_match2;
+     undef $tag_ignore;
+
+     if ($tag_type eq 'Types') {
+	  $tag_match2 = '^T\w+\s+\S+/dbinfo.h\s.*'
+		      . $tag_type_prefix
+		      . $tag_type_patterns{Macros}
+		      . $suffix;
+
+     } elsif ($tag_type eq 'Macros') {
+	  $tag_ignore = '^T\w+\s+\S+/dbinfo.h\s.*'
+		      . $tag_type_prefix
+		      . $tag_type_patterns{Macros}
+		      . $suffix;
+     }
+
+     print "[MATCHING:$tag_match]\n"       if $DEBUG;
+     print "[ALSO MATCHING:$tag_match2]\n" if $DEBUG && defined $tag_match2;
+     print "[IGNORING:$tag_ignore]\n"      if $DEBUG && defined $tag_ignore;
+
+     undef %done;
+     foreach $tag_info (@tag_file_info) {
+
+	  $tag_file = ${$tag_info}[0];
+
+	  $output = "${$tag_info}[1]/$vimfile";
+
+	  print "[TAGS:$tag_file TAGINFO:$output]\n" if $DEBUG;
+
+	  # Don't process the same tag file multiple times (e.g., a command
+	  # generated from the "tags" vim variable may have "tags" and "./tags"
+	  # which may evaluate to the same thing).
+	  #
+	  next if $done{$output};
+	  $done{$output} = 1;
+
+	  if ($create_vimfile) {
+
+	       # If the output file exists, and it is newer than the tags file
+	       # (and this script), don't bother generating a new file; just
+	       # output it's name (if it's not empty) -- [vim] picks up this
+	       # list of files as those that need to be source'ed to set
+	       # highlighting for tags.
+	       #
+	       if (-e $output) {
+		    print "[output file \"$output\" exists]\n" if $DEBUG;
+
+		    $output_stamp = -M $output;
+
+		    if (   $output_stamp < ${$tag_info}[2]
+			&& $output_stamp < $self_stamp    ) {
+
+			 # Output file is newer than tag file; don't generate a
+			 # new file, but do emit the file name if it's
+			 # non-empty.
+			 #
+			 print "[\"$output\" newer than tag file]\n" if $DEBUG;
+			 print "VIM_SCRIPT_FILE:$output\n"
+			      if -s $output and not $quiet;
+
+			 print "[$output is empty]\n"
+			      if $DEBUG && not -s $output;
+
+			 next;
+		    }
+	       }
+
+	       print "[Creating new \"$output\"]\n" if $DEBUG;
+
+	       # Remove the output file before generating a new one. This is
+	       # necessary because if the file exists, opening and closing it
+	       # without writing anything will NOT change the file's timestamp.
+	       #
+	       # i.e., If there are not items of this type to put into this
+	       #       output file, we won't end up changing the timestamp on
+	       #       this file if we don't remove and recreate it.
+	       #
+	       unlink $output or system "touch", $output;
+
+	       open OUTPUT, "> $output"
+		    or die "$self: Cannot write to \"$output\" ($!)\n";
+
+	       $out = \*OUTPUT;
+
+	       if ($ENV{FIND_TAGSTUFF_VERBOSE} && open TTY, "> /dev/tty") {
+		    ($generating = $output) =~ s#^\./#$pwd/#;
+		    print TTY "[Generating \"$generating\"]\n";
+		    close TTY;
+	       }
+	  } else {
+	       $out = \*STDOUT;
+	  }
+
+	  undef %extern_tags;
+	  undef %static_tags;
+	  undef %local_tags;
+	  undef %file_tags;
+
+	  open TAGS, "<$tag_file"
+	       or die "$self: Cannt open \"$tag_file\" ($!)\n";
+
+	  chomp($tag_dir = `dirname $tag_file`);
+	  $tag_dir =~ s#^\.(/|$)#$pwd$1#;
+
+	  print "[TAGDIR:$tag_dir]\n" if $DEBUG;
+
+	  while (<TAGS>) {
+	       print "LINE:$_" if $DEBUG;
+
+	       # Only include tags of the type we're interested in.
+	       unless (/$tag_match$/) {
+		    print "FAILS primary match -->$tag_match<--\n" if $DEBUG;
+		    unless (defined $tag_match2 and /$tag_match2$/) {
+			 print "FAILS secondary match -->$tag_match2<--\n"
+			      if defined $tag_match2 and $DEBUG;
+			 next;
+		    }
+	       }
+	       if (defined $tag_ignore && /$tag_ignore$/) {
+		    print "MATCHES ignore\n" if $DEBUG;
+		    next;
+	       }
+
+	       next unless /$tag_type_prefix.*\blanguage:(\S+)\b/;
+	       ($language = $1) =~ s/(.*)/\L$1\E/;
+
+	       # Ignore tags in vim scripts.
+	       next if $language eq 'vim';
+
+	       # Ignore unrecognized tag format.
+	       next unless /^(\S+)\s+(\S+)\s/;
+
+	       # Extract the tag and target.
+	       ($tag, $tag_target) = ($1, $2);
+
+	       # Fully qualify target path.
+	       $tag_target = "$tag_dir/$tag_target" unless $tag_target =~ /^\//;
+
+	       print "[Tag:\"$tag\", Target:\"$tag_target\"]\n" if $DEBUG;
+
+	       # Ignore some special cases...
+
+	       # ...stuff from lib_hack.
+	       next if $tag_target =~ m#/lib_hack#;
+
+	       # ...stuff from 'sm' and 'db' libraries (when not *in* them).
+	       next if $tag_target =~ m#/util/(sm|db)/#
+		    && $tag_dir    !~ m#/util/$1(/|$)#;
+
+	       # ...stuff from pslent's udbinfo.h (when not *in* pslent).
+	       next if $tag_target =~ m#/pslent/udbinfo.h#
+		    && $tag_dir    !~ m#/pslent(/|$)#;
+
+	       if ($tag_type eq 'Constants') {
+		    # By default, ctags references #define tags simply by a
+		    # line number; if that's the case, examine that line from
+		    # the file; otherwise scan the contents looking for a match
+		    # of the tag pattern.
+		    #
+		    # Extract the tag's target file line number or pattern.
+		    #
+		    if (/^\S+\s+\S+\s+(\d+)$tag_type_prefix/) {
+			 $target_line = $1;
+			 print "\t[Target Line:$target_line]\n" if $DEBUG;
+			 undef $target_pattern;
+		    } elsif (/^\S+\s+\S+\s+\/(.+)\/$tag_type_prefix/) {
+			 $target_pattern = $1;
+			 print "\t[Target Pattern:$target_pattern]\n" if $DEBUG;
+			 next unless $target_pattern =~ /^\^#define\s/;
+			 undef $target_line;
+		    } else {
+			 print "[Don't recognize this tag entry.]\n" if $DEBUG;
+			 next;
+		    }
+
+		    # Check the tag's target file to see if the #define is a
+		    # simple constant.  The target file is cached for speed;
+		    # most likely there is more than one define from the same
+		    # file.
+		    #
+		    unless (defined $file_contents{$tag_target}) {
+			 # First time encountering this target file; cache it.
+			 #
+			 # Be careful not to overwrite $_ (our tag file line).
+			 print "[Caching \"$tag_target\"]\n" if $DEBUG;
+			 unless (open TARGET, "< $tag_target") {
+			      print "[Unable to open \"$tag_target\" ($!)\n"
+				   if $DEBUG;
+			      next;
+			 }
+			 while (my $t = <TARGET>) {
+			      # This simple array is used to access the cached
+			      # file by line number.
+			      #
+			      push @{$file_contents{$tag_target}}, $t;
+
+			      # This hash is used to access the cached file by
+			      # pattern.  The pattern must contain a #define
+			      # token, which is used as the hash key.
+			      #
+			      push @{${$file_defines{$tag_target}}{$1}}, $t
+				   if $t =~ /^\s*#\s*define\s+(\w+)/;
+			 }
+			 close TARGET;
+			 print "[Cached \"$tag_target\" "
+			      ."($#{$file_contents{$tag_target}} lines)]\n"
+			      if $DEBUG;
+		    }
+
+		    if (defined $target_line) {
+			 --$target_line;
+			 $file_contents = $file_contents{$tag_target};
+			 next unless defined ${$file_contents}[$target_line];
+			 $define = ${$file_contents}[$target_line];
+
+		    } elsif (defined $target_pattern) {
+			 $file_defines = $file_defines{$tag_target};
+			 next unless $target_pattern =~ /#\s*define\s+(\w+)/;
+			 next unless defined ${$file_defines}{$1};
+
+			 # Protect perl regexp metacharacters in the vim
+			 # no-magic regexp pattern from the tag file.
+			 #
+			 # NOTE: Slashes will already be escaped.
+			 #
+			 $target_pattern =~ s/([][{}()*+?])/\\$1/g;
+			 $target_pattern =~ s#\$([^/])#\\\$$1#g;
+
+			 $find_tag = qr/$target_pattern/;
+
+			 undef $define;
+			 foreach $d (@{${$file_defines}{$1}}) {
+			      if ($d =~ /$find_tag/) {
+				   $define = $d;
+				   last;
+			      }
+			 }
+			 next unless defined $define;
+		    } else {
+			 die "$self: Don't know what I'm looking for "
+			   . "in $tag_target!?!?\n";
+		    }
+
+		    chomp $define;
+		    print "[Define:$define]\n" if $DEBUG;
+
+		    # We're looking for constants; skip this #define tag if
+		    # its #define's value does not appear to be only:
+		    #	A [typed] [hexadecimal|float] number,
+		    #	optionally surrounded by parentheses.
+		    # -or-
+		    #	A [typed] character; including apostrophe (''''), octal
+		    #	('\012'), and backslashed ('\n').
+		    # -or-
+		    #	A single string.
+		    #
+		    # Optionally followed by a comment.
+		    #
+		    next unless $define =~
+			 /
+			 ^\#\s*define\s+$tag\s+	# #define xxx ...
+			 (
+			      \(?		# Optionally parenthesized
+
+						# Optionally type-cast...
+			      (\(\s*[A-Za-z_]\w*\s*\)\s*)?
+
+			      (
+				   -?\d+(\.\d+)?	# [neg] int or float
+			      |
+				   -?0x[\dA-Fa-f]+	# [neg] hex number
+			      |
+				   '			# Character: '<blah>'
+				   (
+					''		# Apostrophe: ''''
+				   |
+					\\		# Backslashed...
+					(
+					     [0-7]{3}		# Octal: '\015'
+					|
+					     0x[0-9a-fA-F]{2}	# Hex: '\0xFF'
+					)
+				   |
+					\\?.		# [escaped] char
+				   )
+				   '
+			      )
+			      \)?		# Optionally parenthesized
+			 |
+			      "([^"]|\\")*"		# String
+			 )
+			 \s*(\/\/.*|\/\*.*)?$		# Trailing comment
+			 /x;
+
+		    print "[Constant:$1]\n" if $DEBUG;
+	       }
+
+	       $local_tag = ($tag_type =~ /^Locals?$/i);
+
+	       if (/\bfile:(\s|$)/) {
+		    $static_tag = 1;
+	       } else {
+		    undef $static_tag;
+	       }
+
+	       $class = &tag2class($tag, $tag_type, $static_tag, $tag_target);
+
+	       if ($static_tag) {
+		    # This tag is local to the target file specified in the tag
+		    # entry, hash this tag under its file name so that special
+		    # syntax rules can be generated so that these items are
+		    # only highlighted when editing that target file.
+		    #
+		    print "\t[SAVING:static{$tag_target}{$tag}]\n" if $DEBUG;
+		    $static_tags{$tag_target}{$class}{$tag} = $language;
+
+	       } elsif ($local_tag) {
+		    # This tag is local to the target file specified in the tag
+		    # entry (but not static -- i.e., a local variable), hash
+		    # this tag under its file name so that special syntax rules
+		    # can be generated so that these items are only highlighted
+		    # when editing that target file.
+		    #
+		    print "\t[SAVING:static{$tag_target}{$tag}]\n" if $DEBUG;
+		    $local_tags{$tag_target}{$class}{$tag} = $language;
+
+	       } elsif ($tag_target =~ m#/pslent/udbinfo.h#) {
+		    print "\t[SAVING:local{$tag_dir}{$tag}]\n" if $DEBUG;
+		    $file_tags{$tag_dir}{$class}{$tag} = $language;
+
+	       } else {
+		    print "\t[SAVING:extern{$tag}]\n" if $DEBUG;
+		    $extern_tags{$class}{$tag} = $language;
+	       }
+	  }
+	  close TAGS;
+
+	  # When finding Types from the current directory's tag file, extract
+	  # the #defines-to-types from the .sch file(s), considering them to be
+	  # types for the purpose of syntax highlighting.
+	  #
+	  if ($tag_type eq 'Types' && ${$tag_info}[1] eq '.') {
+	       print "[Looking for \"$tag_type\"; checking .sch files...]\n"
+		    if $DEBUG;
+
+	       undef %extern_scr_tags;
+
+	       foreach $sch (<*/*.sch>) {
+		    print "\t[$sch]\n" if $DEBUG;
+		    next unless -s $sch; # Don't bother with empty .sch files.
+		    undef %static_scr_tags;
+
+		    open SCH, "< $sch"
+			 or die "$self: Cannot open \"$sch\" ($!)\n";
+
+		    while (<SCH>) {
+			 # Only interested in defines.
+			 next unless /^#\s*define/;
+
+			 chomp;
+			 print "\t[GOT:$_]\n" if $DEBUG;
+
+			 # See if this #define mentions one of the type names
+			 # we've extracted from the tags file.
+			 #
+			 print "\t\t[External tags]\n" if $DEBUG;
+			 foreach $class (keys %extern_tags) {
+			      foreach $tag (keys %{$extern_tags{$class}}) {
+				   #print "\t\t\t[$tag]\n" if $DEBUG;
+				   next unless
+					/^#\s*define\s+(\w+).*\b$tag\b/;
+				   print "\t\t\t[MATCH:$1]\n" if $DEBUG;
+				   $extern_scr_tags{$class}{$1}
+					= $extern_tags{$class}{$tag};
+				   last;
+			      }
+			 }
+
+			 foreach $file (keys %static_tags) {
+			      foreach $class (keys %{$static_tags{$file}}) {
+				   print "\t\t[Static \"$file\" tags]\n"
+					if $DEBUG;
+
+				   foreach $tag
+					(keys %{$static_tags{$file}{$class}}) {
+
+					#print "\t\t\t\t[$tag]\n" if $DEBUG;
+					next unless
+					     /^#\s*define\s+(\w+).*\b$tag\b/;
+					print "\t\t\t\t[MATCH:$1]\n" if $DEBUG;
+					$static_scr_tags{$file}{$class}{$1}
+					     = $static_tags{$file}{$class}{$_};
+					last;
+				   }
+			      }
+			 }
+		    }
+		    close SCH;
+
+		    foreach $file (keys %static_scr_tags) {
+			 foreach $class (keys %{$static_scr_tags{$class}}) {
+			      foreach (keys %{$static_scr_tags{$file}{$class}}){
+				   print "\t\t[TAG:static{$file}{$class}{$_}]\n"
+					if $DEBUG;
+				   $static_tags{$file}{$class}{$_}
+					= $static_scr_tags{$file}{$class}{$_};
+			      }
+			 }
+		    }
+	       }
+	       foreach $class (keys %extern_scr_tags) {
+		    foreach (keys %{$extern_scr_tags{$class}}) {
+			 print "\t\t[TAG:extern{$class}{$_}]\n" if $DEBUG;
+			 $extern_tags{$class}{$_}
+			      = $extern_scr_tags{$class}{$_};
+		    }
+	       }
+	  }
+
+	  foreach $class (sort keys %extern_tags) {
+	       ($syntax_group = "External$class$tag_type") =~ s/s$//;
+
+	       undef %langs;
+	       foreach $tag (keys %{$extern_tags{$class}}) {
+		    $langs{$extern_tags{$class}{$tag}} = 1;
+	       }
+
+	       foreach $lang (sort keys %langs) {
+		    $prefix = "syn keyword $lang$syntax_group";
+		    $length = 0;
+
+		    foreach $tag (sort keys %{$extern_tags{$class}}) {
+			 next unless $extern_tags{$class}{$tag} eq $lang;
+			 if ($length == 0 or $length > 0x800) {
+			      print $out "\n$prefix";
+			      $length = length $prefix;
+			 }
+			 print $out " $tag";
+			 $length += length($tag) + 1;
+		    }
+		    print $out "\n";
+	       }
+	  }
+
+	  # NOTE: We specifically want to emit the file-local tags *after* the
+	  #       external tags, so they will take precedence if there are any
+	  #       collisions (duplicates).
+	  #
+	  if (%file_tags) {
+	       print "[FILE-LOCAL TAGS]\n" if $DEBUG;
+
+	       print $out "\nlet fulldir = expand('%:p:h')\n";
+
+	       foreach $dir (keys %file_tags) {
+		    print $out "\nif (fulldir == '$dir')";
+
+		    foreach $class (keys %{$file_tags{$dir}}) {
+			 ($syntax_group = "Static$class$tag_type") =~ s/s$//;
+
+			 undef %langs;
+			 foreach $tag (keys %{$file_tags{$dir}{$class}}) {
+			      $langs{$file_tags{$dir}{$class}{$tag}} = 1;
+			 }
+
+			 foreach $lang (sort keys %langs) {
+			      $prefix = "\tsyn keyword $lang$syntax_group";
+			      $length = 0;
+
+			      for $tag (sort keys %{$file_tags{$dir}{$class}}){
+				   next unless $file_tags{$dir}{$class}{$tag}
+					    eq $lang;
+
+				   if ($length == 0 or $length > 0x800) {
+					print $out "\n\t$prefix";
+					$length = length $prefix;
+				   }
+				   print $out " $tag";
+				   $length += length($tag) + 1;
+			      }
+			      print $out "\n";
+			 }
+		    }
+		    print $out "\nendif\n";
+	       }
+	  }
+
+	  # NOTE: We specifically want to emit the local tags *after* the
+	  #       file-local and extern tags, so they will take precedence if
+	  #       there are any collisions.
+	  #
+	  if (%local_tags) {
+	       print "[LOCAL TAGS]\n" if $DEBUG;
+
+	       print $out "\nlet fullpath = expand('%:p')\n";
+
+	       foreach $file (keys %local_tags) {
+		    print $out "\nif (fullpath == '$file')";
+
+		    foreach $class (keys %{$local_tags{$file}}) {
+			 ($syntax_group = "Dynamic$class$tag_type") =~ s/s$//;
+
+			 undef %langs;
+			 foreach $tag (keys %{$local_tags{$file}{$class}}) {
+			      $langs{$local_tags{$file}{$class}{$tag}} = 1;
+			 }
+
+			 foreach $lang (sort keys %langs) {
+			      $prefix = "\tsyn keyword $lang$syntax_group";
+			      $length = 0;
+
+			      for $tag (sort
+					keys %{$local_tags{$file}{$class}}) {
+
+				   next unless $local_tags{$file}{$class}{$tag}
+				            eq $lang;
+
+				   if ($length == 0 or $length > 0x800) {
+					print $out "\n\t$prefix";
+					$length = length $prefix;
+				   }
+				   print $out " $tag";
+				   $length += length($tag) + 1;
+			      }
+			 }
+			 print $out "\n";
+		    }
+		    print $out "\nendif\n";
+	       }
+	  }
+
+	  # NOTE: We specifically want to emit the static tags *after* the
+	  #       file-local, extern, and local tags, so they will take
+	  #       precedence if there are any collisions.
+	  #
+	  if (%static_tags) {
+	       print "[STATIC TAGS]\n" if $DEBUG;
+
+	       print $out "\nlet fullpath = expand('%:p')\n";
+
+	       foreach $file (keys %static_tags) {
+		    print $out "\nif (fullpath == '$file')";
+
+		    foreach $class (keys %{$static_tags{$file}}) {
+			 ($syntax_group = "Static$class$tag_type") =~ s/s$//;
+
+			 undef %langs;
+			 foreach $tag (keys %{$static_tags{$file}{$class}}) {
+			      $langs{$static_tags{$file}{$class}{$tag}} = 1;
+			 }
+
+			 foreach $lang (sort keys %langs) {
+			      $prefix = "\tsyn keyword $lang$syntax_group";
+			      $length = 0;
+
+			      for $tag (sort
+					keys %{$static_tags{$file}{$class}}) {
+
+				   next unless $static_tags{$file}{$class}{$tag}
+				            eq $lang;
+
+				   if ($length == 0 or $length > 0x800) {
+					print $out "\n\t$prefix";
+					$length = length $prefix;
+				   }
+				   print $out " $tag";
+				   $length += length($tag) + 1;
+			      }
+			 }
+			 print $out "\n";
+		    }
+		    print $out "\nendif\n";
+	       }
+	  }
+
+	  close $out unless $out == \*STDOUT;
+
+	  if ($create_vimfile) {
+	       print "VIM_SCRIPT_FILE:$output\n"
+		    if -s $output && not $quiet;
+
+	       print "[$output is empty]\n"
+		    if $DEBUG && not -s $output;
+	  }
+     }
+}
+
+# =============================================================================
+
+# SUBROUTINE: tag2class
+#	Determine the 'class' of the tag, based on where the target of the tag
+#	is.
+#
+#	The term "class" probably isn't the best term to use; it has nothing to
+#	do with Object-Oriented Programming.
+#
+# NOTE:
+#	Obviously, this routine is Cast & Crew specific, based on where we keep
+#	things.  On a generic system, this routine could be tweaked to classify
+#	tags as desired (or just always return '').
+#
+#	As-is, it would likey correctly identify tags in the "Lib" category
+#	(since the tag would probably bin in some path containing "/lib/").
+#	The others would be unlikely to be triggered.
+#
+# RETURNS:
+#	Tag's "class".
+
+sub tag2class()
+{
+     my ($tag, $tag_type, $static_tag, $tag_target) = @_;
+     my $class;
+
+
+     if (   $tag_target =~ m#/((unify|def)/|dbtool/uconst.h)#
+	 || (   defined $ENV{DBINFO_DIR}
+	     && $tag_target =~ m#$ENV{DBINFO_DIR}#)) {
+
+	  # The target path for the tag contains "/unify/" or "/def/" (e.g.,
+	  # "$DBPATH/../def/"), is in dbtool's uconst.h, or contains
+	  # $DBINFO_DIR, consider this a "Unify" (i.e., database) tag.
+	  #
+	  $class = 'Unify';
+
+     } elsif ($tag_target =~ m#(/util|lib)/#) {
+	  # Item path contains "/util/" or "*lib/"; consider this a library
+	  # tag...
+	  #
+	  # Unless it's from /util/db, then consider it a Unify thing unless
+	  # the tag begins with "dB_".
+	  #
+	  $class = (   (not $static_tag)
+		    && $tag_type   =~ /(Functions|Constants)/
+		    && $tag_target =~ m#/util/db/#
+		    && $tag !~ /^dB_/             ) ? 'Unify' : 'Lib';
+
+     } else {
+	  $class = '';	# No special class; just a "local" tag.
+     }
+
+     return $class;
+}
+
+# =============================================================================
+
+exit 0;
