@@ -502,7 +502,10 @@ foreach (@find_tag_types) {
 		    next;
 	       }
 
-	       next unless /$tag_type_prefix.*\blanguage:(\S+)\b/;
+	       unless (/$tag_type_prefix.*\blanguage:(\S+)\b/) {
+		    print "NO LANGUAGE\n" if $DEBUG;
+		    next;
+	       }
 	       ($language = $1) =~ s/(.*)/\L$1\E/;
 
 	       # Ignore tags in vim scripts.

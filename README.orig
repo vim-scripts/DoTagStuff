@@ -18,10 +18,17 @@ hardcode the full path to it in the DoTagStuff.vim script.  This script will
 create files starting with ".vim" (so they won't normally be seen), that are
 little vim scripts that get sourced to set syntax highlighting.
 
-Note that this stuff was rather quickly extracted from our working environment,
-and edited to try and remove most of our environment-specific settings.  It all
-works fine in our environment, and I *think* I've included all the pieces here,
-but it hasn't been tested in this form.
+NOTES:
+     You *must* include the --fields option to ctags that includes "language of
+     source file containing tag" (i.e., "--fields=l" ; I use --fields+=Kl)
+     ctags option to include the language type in the tags file.  This is
+     needed to properly form syntax groups (e.g., cStaticFunction or
+     perlExternalFunction).
 
-Note also that it was all designed for a Linux environment; no guarantees on
-behavior under Windows.
+     This stuff was rather quickly extracted from our working environment, and
+     edited to try and remove most of our environment-specific settings.  It
+     all works fine in our environment, and I *think* I've included all the
+     pieces here, but it hasn't been tested in this form.
+
+     All this was designed for a Linux environment; no guarantees on behavior
+     under Windows.
